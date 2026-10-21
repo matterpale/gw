@@ -699,9 +699,12 @@ func tmuxWindowExists(name string) bool {
 	return false
 }
 
+// tmux reads "." and ":" in a target as pane and window separators, so they
+// must not appear in window names.
+var titleSafe = strings.NewReplacer("/", "-", " ", "_", ".", "-", ":", "-")
+
 func wtWindowTitle(projectName, branch string) string {
-	safe := strings.NewReplacer("/", "-", " ", "_", ".", "-", ":", "-").Replace(branch)
-	return "wt-" + projectName + "-" + safe
+	return "wt-" + titleSafe.Replace(projectName) + "-" + titleSafe.Replace(branch)
 }
 
 // ensureStorageWindow creates a detached tmux window for the worktree if it
@@ -1066,7 +1069,7 @@ func updateStatusBar(baseTitle, activeSub string) {
 
 func getWorktreePath(st State, baseTitle string) string {
 	for _, p := range st.Projects {
-		if !strings.HasPrefix(baseTitle, "wt-"+p.Name+"-") {
+		if !strings.HasPrefix(baseTitle, "wt-"+titleSafe.Replace(p.Name)+"-") {
 			continue
 		}
 		trees, err := listWorktrees(p.Path)
