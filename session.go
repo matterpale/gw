@@ -60,23 +60,43 @@ func (st *State) recordVisit(title string) {
 	st.Visits[title] = v
 }
 
+// gwDir is the one location for gw's files on every platform. os.UserConfigDir is
+// not used: on macOS it returns a path with a space, which the tmux commands and
+// the Python scripts must then agree on and quote.
+func gwDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "gw")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "gw")
+}
+
 func statePath() string {
-	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "gw", "state.json")
+	return filepath.Join(gwDir(), "state.json")
+}
+
+// legacyStatePath is where earlier builds kept state on macOS.
+func legacyStatePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Application Support", "gw", "state.json")
 }
 
 // switchRequestPath holds a worktree title written by the monitor (e.g. when a
 // desktop notification is clicked) requesting the sidebar switch its active
 // slot to that worktree. The sidebar consumes and deletes it on its tick.
 func switchRequestPath() string {
-	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "gw", "switch_request")
+	return filepath.Join(gwDir(), "switch_request")
 }
 
 func loadState() State {
 	data, err := os.ReadFile(statePath())
 	if err != nil {
-		return State{}
+		data, err = os.ReadFile(legacyStatePath())
+		if err != nil {
+			return State{}
+		}
+		os.MkdirAll(gwDir(), 0755)
+		os.WriteFile(statePath(), data, 0644)
 	}
 	var st State
 	json.Unmarshal(data, &st)
@@ -112,6 +132,116 @@ func (st *State) RemoveProject(path string) {
 	st.Projects = kept
 }
 
+// ── Config ────────────────────────────────────────────────────────────────────
+
+// Config is the optional ~/.config/gw/config.json. Key names use the bubbletea
+// format ("ctrl+s").
+type Config struct {
+	Tmux struct {
+		// GlobalBindings maps an action in globalActions to keys that work
+		// without the tmux prefix.
+		GlobalBindings map[string][]string `json:"global_bindings"`
+	} `json:"tmux"`
+	Keys struct {
+		PRDetails struct {
+			Save []string `json:"save"`
+		} `json:"pr_details"`
+		CreatePR struct {
+			Create []string `json:"create"`
+		} `json:"create_pr"`
+	} `json:"keys"`
+}
+
+func loadConfig() Config {
+	var cfg Config
+	if data, err := os.ReadFile(filepath.Join(gwDir(), "config.json")); err == nil {
+		if json.Unmarshal(data, &cfg) != nil {
+			cfg = Config{}
+		}
+	}
+	if len(cfg.Keys.PRDetails.Save) == 0 {
+		cfg.Keys.PRDetails.Save = []string{"ctrl+s"}
+	}
+	if len(cfg.Keys.CreatePR.Create) == 0 {
+		cfg.Keys.CreatePR.Create = []string{"ctrl+s"}
+	}
+	return cfg
+}
+
+func keyIn(keys []string, key string) bool {
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+var tmuxKeyNames = map[string]string{
+	"up": "Up", "down": "Down", "left": "Left", "right": "Right",
+	"enter": "Enter", "tab": "Tab", "esc": "Escape", "space": "Space",
+	"pgup": "PPage", "pgdown": "NPage", "home": "Home", "end": "End",
+}
+
+// tmuxKey translates a config key name to tmux's notation: "ctrl+e" to "C-e".
+func tmuxKey(key string) string {
+	if key == "shift+tab" {
+		return "BTab"
+	}
+	parts := strings.Split(key, "+")
+	var sb strings.Builder
+	for _, mod := range parts[:len(parts)-1] {
+		switch mod {
+		case "ctrl":
+			sb.WriteString("C-")
+		case "alt":
+			sb.WriteString("M-")
+		case "shift":
+			sb.WriteString("S-")
+		}
+	}
+	base := parts[len(parts)-1]
+	if name, ok := tmuxKeyNames[base]; ok {
+		base = name
+	} else if len(base) > 1 && base[0] == 'f' {
+		base = "F" + base[1:]
+	}
+	sb.WriteString(base)
+	return sb.String()
+}
+
+// globalActions gives the tmux command for each action that config.json can bind.
+func globalActions(self string) map[string]string {
+	shell := func(flag string) string {
+		return "run-shell " + tmuxQuote(self+" "+flag)
+	}
+	return map[string]string{
+		"focus_sidebar": "select-pane -t gw:active.0",
+		"new_tab":       shell("--new-subwindow"),
+		"close_tab":     shell("--close-subwindow"),
+		"next_tab":      shell("--next-subwindow"),
+		"previous_tab":  shell("--prev-subwindow"),
+	}
+}
+
+// bindGlobalKeys binds the configured keys in tmux's root table. Those bindings
+// apply to the whole tmux server, so outside the gw session a key goes to the
+// program as usual.
+func bindGlobalKeys(self string, bindings map[string][]string) {
+	actions := globalActions(self)
+	for action, keys := range bindings {
+		command, ok := actions[action]
+		if !ok {
+			continue
+		}
+		for _, key := range keys {
+			k := tmuxKey(key)
+			exec.Command("tmux", "bind-key", "-n", k, "if-shell", "-F",
+				"#{==:#{session_name},gw}", command, "send-keys "+k).Run()
+		}
+	}
+}
+
 // ── Tmux pane management ──────────────────────────────────────────────────────
 //
 // Each worktree gets a hidden tmux window ("storage window") that holds its
@@ -124,7 +254,7 @@ var previewReady bool
 
 // monitorScript is a self-contained Python script that renders CPU/RAM
 // sparklines and all temperature sensors into the narrow (25-col) side pane.
-const monitorScript = `import sys, time, json, subprocess
+const monitorScript = `import ctypes, re, shutil, sys, time, json, subprocess
 
 SPARK = " ▁▂▃▄▅▆▇█"
 
@@ -132,20 +262,47 @@ def spark(h, w=10):
     s = [SPARK[min(8, max(0, int(v / 100 * 8)))] for v in h[-w:]]
     return " " * (w - len(s)) + "".join(s)
 
-def read_cpu():
-    f = open("/proc/stat").readline().split()
-    idle = int(f[4]) + int(f[5])
-    total = sum(int(x) for x in f[1:8])
-    return idle, total
+if sys.platform == "darwin":
+    LIBC = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    LIBC.mach_host_self.restype = ctypes.c_uint
+    HOST = LIBC.mach_host_self()
+    HOST_CPU_LOAD_INFO = 3
 
-def read_mem():
-    d = {}
-    for line in open("/proc/meminfo"):
-        if ":" in line:
+    def read_cpu():
+        # Ticks since boot, in the order user, system, idle, nice.
+        ticks = (ctypes.c_uint * 4)()
+        count = ctypes.c_uint(4)
+        LIBC.host_statistics(HOST, HOST_CPU_LOAD_INFO, ticks, ctypes.byref(count))
+        return ticks[2], sum(ticks)
+
+    def read_mem():
+        total = ctypes.c_uint64()
+        size = ctypes.c_size_t(ctypes.sizeof(total))
+        LIBC.sysctlbyname(b"hw.memsize", ctypes.byref(total), ctypes.byref(size), None, 0)
+        out = subprocess.check_output(["vm_stat"]).decode()
+        page = int(re.search(r"page size of (\d+)", out).group(1))
+        pages = {}
+        for line in out.splitlines()[1:]:
             k, _, v = line.partition(":")
-            d[k.strip()] = int(v.split()[0])
-    used = (d["MemTotal"] - d["MemAvailable"]) // 1024
-    return used, d["MemTotal"] // 1024
+            pages[k.strip()] = int(v.strip().rstrip("."))
+        free = pages["Pages free"] + pages["Pages speculative"] + pages["Pages inactive"]
+        tm = total.value // (1024 * 1024)
+        return tm - free * page // (1024 * 1024), tm
+else:
+    def read_cpu():
+        f = open("/proc/stat").readline().split()
+        idle = int(f[4]) + int(f[5])
+        total = sum(int(x) for x in f[1:8])
+        return idle, total
+
+    def read_mem():
+        d = {}
+        for line in open("/proc/meminfo"):
+            if ":" in line:
+                k, _, v = line.partition(":")
+                d[k.strip()] = int(v.split()[0])
+        used = (d["MemTotal"] - d["MemAvailable"]) // 1024
+        return used, d["MemTotal"] // 1024
 
 def read_temps():
     try:
@@ -185,25 +342,26 @@ while True:
     rh = rh[-20:]
     ug, tg = um / 1024, tm / 1024
 
+    cols = shutil.get_terminal_size((25, 16)).columns
+    sw = max(1, min(10, cols - 15))
     lines = [
-        f"CPU {spark(ch)} {cp:4.1f}%",
-        f"RAM {spark(rh)} {ug:.1f}/{tg:.0f}G",
-        "─" * 20,
+        f"CPU {spark(ch, sw)} {cp:4.1f}%",
+        f"RAM {spark(rh, sw)} {ug:.1f}/{tg:.0f}G",
+        "─" * min(20, cols),
     ]
     for cname, sname, temp in read_temps():
         lines.append(f"{cname}/{sname}: {temp:.0f}°C")
 
     sys.stdout.write("\033[H")
     for line in lines:
-        sys.stdout.write("\033[2K" + line[:25] + "\n")
+        sys.stdout.write("\033[2K" + line[:cols] + "\n")
     sys.stdout.write("\033[J")
     sys.stdout.flush()
     time.sleep(1)
 `
 
 func monitorScriptPath() string {
-	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "gw", "monitor.py")
+	return filepath.Join(gwDir(), "monitor.py")
 }
 
 func writeMonitorScript() string {
@@ -224,11 +382,16 @@ func writeMonitorScript() string {
 //
 // "input" detection works by scraping each running agent pane with capture-pane
 // and matching known permission-prompt patterns. On the rising edge (a pane that
-// was not waiting starts waiting) a desktop notification is fired via notify-send
-// so the user can find which background worktree needs attention without hunting
-// through tabs. Patterns can be overridden with the GW_ATTN_PATTERNS env var
-// (a '|'-separated, case-insensitive substring list).
-const windowsListScript = `import subprocess, sys, time, json, os, shutil, threading
+// was not waiting starts waiting) a desktop notification is fired so the user can
+// find which background worktree needs attention without hunting through tabs. It
+// uses notify-send on Linux, and terminal-notifier or iTerm2's OSC 9 escape code on
+// macOS. Patterns can be overridden with the GW_ATTN_PATTERNS env var (a
+// '|'-separated, case-insensitive substring list). The first argument is gw's
+// directory, so that the script and the Go code read the same files.
+const windowsListScript = `import subprocess, sys, time, json, os, shlex, shutil, threading
+
+GW_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/.config/gw')
+SWITCH_REQUEST = os.path.join(GW_DIR, 'switch_request')
 
 SHELLS = {'bash', 'zsh', 'fish', 'sh', 'dash', 'tcsh'}
 W = 24
@@ -260,6 +423,11 @@ NOTIFY_TIMEOUT = float(os.environ.get('GW_NOTIFY_TIMEOUT', '35'))
 # is preferred; xdotool is the fallback. Both no-op gracefully when absent.
 WMCTRL = shutil.which('wmctrl') if os.environ.get('DISPLAY') else None
 XDOTOOL = shutil.which('xdotool') if os.environ.get('DISPLAY') else None
+# macOS: terminal-notifier can run a command on click, so a click can switch the
+# worktree. Without it, gw asks iTerm2 to post the notification (OSC 9), and a
+# click only raises iTerm2.
+MAC_NOTIFIER = shutil.which('terminal-notifier')
+TERMINAL_BUNDLE = os.environ.get('__CFBundleIdentifier') or 'com.googlecode.iterm2'
 
 def c(code, text):
     return f'\033[{code}m{text}{RST}'
@@ -372,8 +540,7 @@ def focus(sub):
     # performs the proper server-side swap-pane — and surface gw:active.
     base = sub.split('~')[0]
     try:
-        p = os.path.expanduser('~/.config/gw/switch_request')
-        with open(p, 'w') as f:
+        with open(SWITCH_REQUEST, 'w') as f:
             f.write(base)
     except Exception:
         pass
@@ -384,10 +551,45 @@ def focus(sub):
         pass
     raise_terminal()
 
+def notify_terminal_notifier(where, sub):
+    # The click command runs later, outside tmux, with a minimal environment. It
+    # repeats focus() with absolute paths and an explicit tmux socket.
+    tmux = [shutil.which('tmux') or 'tmux']
+    socket = os.environ.get('TMUX', '').split(',')[0]
+    if socket:
+        tmux += ['-S', socket]
+    tmux += ['select-window', '-t', 'gw:active']
+    click = '; '.join([
+        'printf %s ' + shlex.quote(sub.split('~')[0]) + ' > ' + shlex.quote(SWITCH_REQUEST),
+        ' '.join(shlex.quote(a) for a in tmux),
+        'open -b ' + shlex.quote(TERMINAL_BUNDLE),
+    ])
+    group = 'gw-' + sub
+    subprocess.Popen(
+        [MAC_NOTIFIER, '-title', '⚠ worktree needs input', '-message', where,
+         '-group', group, '-execute', click],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    timer = threading.Timer(NOTIFY_TIMEOUT, lambda: subprocess.run(
+        [MAC_NOTIFIER, '-remove', group],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    timer.daemon = True
+    timer.start()
+
+def notify_osc9(where):
+    # tmux forwards this to the terminal only with allow-passthrough set on the
+    # pane. Control characters in a branch name must not end the sequence early.
+    text = ''.join(ch for ch in '⚠ ' + where + ' needs input' if ch.isprintable())
+    sys.stdout.write('\033Ptmux;\033\033]9;' + text + '\007\033\\')
+    sys.stdout.flush()
+
 def notify(proj, branch, idx, sub):
-    if not NOTIFY:
-        return
     where = proj + '/' + branch + (' #' + idx if idx != '1' else '')
+    if not NOTIFY:
+        if MAC_NOTIFIER:
+            notify_terminal_notifier(where, sub)
+        elif sys.platform == 'darwin':
+            notify_osc9(where)
+        return
     # Run notify-send with --wait so it blocks until the notification is acted on
     # or dismissed; --action makes clicking the body emit 'default' on stdout, and
     # -p prints the notification id on the first line. Critical urgency means the
@@ -429,7 +631,7 @@ def notify(proj, branch, idx, sub):
             focus(sub)
     threading.Thread(target=worker, daemon=True).start()
 
-STATE_PATH = os.path.expanduser('~/.config/gw/state.json')
+STATE_PATH = os.path.join(GW_DIR, 'state.json')
 _state = (None, {})
 
 def load_state():
@@ -575,8 +777,7 @@ while True:
 `
 
 func windowsListScriptPath() string {
-	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "gw", "windows-list.py")
+	return filepath.Join(gwDir(), "windows-list.py")
 }
 
 func writeWindowsListScript() string {
@@ -607,8 +808,10 @@ func ensurePreviewColumn() {
 		return
 	}
 
+	total, _ := windowSize()
+	_, column := layoutWidths(total)
 	out, err := exec.Command("tmux", "split-window",
-		"-h", "-t", "gw:active.1", "-l", "25", "-d",
+		"-h", "-t", "gw:active.1", "-l", strconv.Itoa(column), "-d",
 		"-P", "-F", "#{pane_id}").Output()
 	if err != nil {
 		return
@@ -631,26 +834,92 @@ func ensurePreviewColumn() {
 	}
 	listID := strings.TrimSpace(string(out))
 
-	listScript := writeWindowsListScript()
-	// Tag the pane so refreshMonitorPane can find and respawn it on relaunch,
-	// picking up an updated script without killing the session.
+	// Tag the panes so refreshMonitorPane can find and respawn them on relaunch,
+	// picking up updated scripts without killing the session.
 	exec.Command("tmux", "set-option", "-p", "-t", listID, "@gw_pane", "list").Run()
-	exec.Command("tmux", "send-keys", "-t", listID, "python3 "+listScript, "Enter").Run()
-	monitorScript := writeMonitorScript()
-	exec.Command("tmux", "send-keys", "-t", monitorID, "python3 "+monitorScript, "Enter").Run()
+	startListPane(listID)
+	exec.Command("tmux", "set-option", "-p", "-t", monitorID, "@gw_pane", "monitor").Run()
+	startMonitorPane(monitorID)
 
+	applyLayout()
 	previewReady = true
 }
 
-// refreshMonitorPane rewrites the windows-list script to disk and respawns the
-// live list pane so script changes take effect on relaunch — without requiring
-// the user to kill the whole gw session. No-op when the session or tagged pane
-// is absent (e.g. a session created by an older binary that never tagged it).
+// startScriptPane replaces the pane's process with a Python script. tmux runs
+// separate arguments without a shell, so a path needs no quoting.
+func startScriptPane(id string, args ...string) {
+	exec.Command("tmux", append([]string{"respawn-pane", "-k", "-t", id, "python3"}, args...)...).Run()
+}
+
+func startListPane(id string) {
+	// The list posts iTerm2 notifications with an escape code that tmux blocks
+	// unless the pane allows it.
+	exec.Command("tmux", "set-option", "-p", "-t", id, "allow-passthrough", "on").Run()
+	startScriptPane(id, writeWindowsListScript(), gwDir())
+}
+
+func startMonitorPane(id string) {
+	startScriptPane(id, writeMonitorScript())
+}
+
+// refreshMonitorPane rewrites the scripts to disk and respawns the tagged panes so
+// script changes take effect on relaunch — without requiring the user to kill the
+// whole gw session. No-op when the session or tagged panes are absent (e.g. a
+// session created by an older binary that never tagged them).
 func refreshMonitorPane() {
 	if !tmuxSessionExists("gw") {
 		return
 	}
-	script := writeWindowsListScript()
+	out, err := exec.Command("tmux", "list-panes", "-t", "gw:active",
+		"-F", "#{pane_id} #{@gw_pane}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[1] {
+		case "list":
+			startListPane(fields[0])
+		case "monitor":
+			startMonitorPane(fields[0])
+		}
+	}
+}
+
+// layoutWidths gives the sidebar and right column widths for a window. Below 120
+// columns both shrink, so that the main pane stays usable in a default 80-column
+// terminal.
+func layoutWidths(total int) (sidebar, column int) {
+	if total >= 120 {
+		return 40, 25
+	}
+	return max(20, total*3/10), max(10, total*18/100)
+}
+
+func windowSize() (width, height int) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", "gw:active",
+		"#{window_width} #{window_height}").Output()
+	if err != nil {
+		return 0, 0
+	}
+	fmt.Sscan(string(out), &width, &height)
+	return width, height
+}
+
+// applyLayout sets the pane sizes from the current window size. tmux scales panes
+// in proportion when a client attaches or resizes, which alone would leave the
+// fixed-width columns at a size that depends on when the column was created.
+func applyLayout() {
+	total, height := windowSize()
+	if total == 0 {
+		return
+	}
+	sidebar, column := layoutWidths(total)
+	exec.Command("tmux", "resize-pane", "-t", "gw:active.0", "-x", strconv.Itoa(sidebar)).Run()
+
 	out, err := exec.Command("tmux", "list-panes", "-t", "gw:active",
 		"-F", "#{pane_id} #{@gw_pane}").Output()
 	if err != nil {
@@ -659,11 +928,22 @@ func refreshMonitorPane() {
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[1] == "list" {
-			exec.Command("tmux", "respawn-pane", "-k", "-t", fields[0],
-				"python3 "+script).Run()
+			exec.Command("tmux", "resize-pane", "-t", fields[0],
+				"-x", strconv.Itoa(column), "-y", strconv.Itoa(max(6, height*2/3))).Run()
 			return
 		}
 	}
+}
+
+// shellQuote makes s one word for /bin/sh, which runs tmux's run-shell commands.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// tmuxQuote makes s one argument in a command string that tmux parses, as in
+// set-hook.
+func tmuxQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(s) + `"`
 }
 
 // updatePreviewTarget ensures the preview column is created. Called on every
@@ -1118,7 +1398,29 @@ func removeWorktree(projectPath, wtPath, title string, isActive bool, st State) 
 	return nil
 }
 
+// caseCollision returns the existing branch that differs from branch only by case,
+// when the repository is on a case-insensitive filesystem (APFS by default). Git
+// keeps loose refs as files there, so both names would share one ref.
+func caseCollision(projectPath, branch string) string {
+	if v, _ := gitOutput(projectPath, "config", "--bool", "core.ignorecase"); v != "true" {
+		return ""
+	}
+	out, err := gitOutput(projectPath, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return ""
+	}
+	for _, existing := range strings.Split(out, "\n") {
+		if existing != branch && strings.EqualFold(existing, branch) {
+			return existing
+		}
+	}
+	return ""
+}
+
 func addWorktree(projectPath, projectName, branch, startPoint string) (Worktree, string, error) {
+	if existing := caseCollision(projectPath, branch); existing != "" {
+		return Worktree{}, "", fmt.Errorf("branch %q differs only by case from %q", branch, existing)
+	}
 	safe := strings.ReplaceAll(branch, "/", "-")
 	wtPath := filepath.Join(filepath.Dir(projectPath), filepath.Base(projectPath)+"-"+safe)
 

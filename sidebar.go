@@ -268,6 +268,7 @@ type sidebarModel struct {
 	searchInput   textinput.Model
 	searchMatches []int
 	searchCursor  int
+	showHelp      bool // full help in a window too short to show it by default
 	// viewCreate step 2: base branch picker for new branches
 	createStep          int    // 0 = typing name, 1 = picking base
 	createBranch        string // branch name confirmed in step 0
@@ -717,6 +718,9 @@ func (m sidebarModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.listOffset = 0
 			m.recomputeSearchMatches()
 			return m, textinput.Blink
+		case "?":
+			m.showHelp = !m.showHelp
+			m.ensureCursorVisible()
 		}
 	}
 	return m, nil
@@ -1229,12 +1233,22 @@ func (m *sidebarModel) ensureCursorVisible() {
 	}
 }
 
+// shortWindow reports a window too short for the dog and the full help: together
+// they take 19 rows, and the worktree list must come first.
+func (m sidebarModel) shortWindow() bool {
+	return m.height > 0 && m.height < 32
+}
+
 func (m sidebarModel) sidebarTop(w int) string {
 	label := sectionStyle.Render("worktrees")
 	if m.searching {
 		label = activeStyle.Render("/") + " " + m.searchInput.View()
 	}
-	return m.dogView() + "\n" +
+	dog := ""
+	if !m.shortWindow() {
+		dog = m.dogView() + "\n"
+	}
+	return dog +
 		dimStyle.Render(strings.Repeat("─", w-1)) + "\n" +
 		label + "\n" +
 		dimStyle.Render(strings.Repeat("─", w-1)) + "\n"
@@ -1243,6 +1257,9 @@ func (m sidebarModel) sidebarTop(w int) string {
 func (m sidebarModel) sidebarFooter(w int) string {
 	col := (w - 2) / 2
 	div := dimStyle.Render(strings.Repeat("─", w-1))
+	if m.shortWindow() && !m.showHelp {
+		return div + "\n" + helpStyle.Render(truncate("? help   q quit", w-1))
+	}
 	return div + "\n" +
 		sectionStyle.Render("gw") + "\n" +
 		helpPair("↑↓ / k j  move", "enter / o  open", col) + "\n" +
@@ -1660,6 +1677,7 @@ type prDetailsModel struct {
 	editIdx  int
 	editor   textarea.Model
 	viewport viewport.Model
+	saveKeys []string
 }
 
 type prDetailsLoadedMsg struct {
@@ -1676,7 +1694,7 @@ func runPRDetails(path string) {
 	ta.Placeholder = "Write a PR comment…"
 	ta.ShowLineNumbers = false
 	ta.Focus()
-	p := tea.NewProgram(prDetailsModel{path: path, loading: true, editor: ta}, tea.WithAltScreen())
+	p := tea.NewProgram(prDetailsModel{path: path, loading: true, editor: ta, saveKeys: loadConfig().Keys.PRDetails.Save}, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "gw pr:", err)
 	}
@@ -1695,13 +1713,7 @@ func (m prDetailsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.currentPRBody())
 	case tea.KeyMsg:
 		if m.editing != prEditNone {
-			switch msg.String() {
-			case "ctrl+c", "esc":
-				m.editing = prEditNone
-				m.status = "edit cancelled"
-				m.viewport.SetContent(m.currentPRBody())
-				return m, nil
-			case "ctrl+s":
+			if keyIn(m.saveKeys, msg.String()) {
 				body := strings.TrimSpace(m.editor.Value())
 				if body == "" {
 					m.status = "body cannot be empty"
@@ -1709,6 +1721,13 @@ func (m prDetailsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.loading = true
 				return m, savePRText(m.path, m.pr.ID, m.editing, m.editIdx, m.commentID(m.editIdx), body)
+			}
+			switch msg.String() {
+			case "ctrl+c", "esc":
+				m.editing = prEditNone
+				m.status = "edit cancelled"
+				m.viewport.SetContent(m.currentPRBody())
+				return m, nil
 			}
 			var cmd tea.Cmd
 			m.editor, cmd = m.editor.Update(msg)
@@ -1800,7 +1819,7 @@ func (m prDetailsModel) View() string {
 		w = 100
 	}
 	if m.editing != prEditNone {
-		return m.prHeader(w) + "\n" + m.editTitle() + "\n" + m.editor.View() + "\n" + helpStyle.Render("ctrl+s save   esc cancel")
+		return m.prHeader(w) + "\n" + m.editTitle() + "\n" + m.editor.View() + "\n" + helpStyle.Render(strings.Join(m.saveKeys, "/")+" save   esc cancel")
 	}
 	return m.prHeader(w) + "\n" + m.viewport.View() + "\n" + m.prFooter(w)
 }
@@ -2241,6 +2260,8 @@ type createPRModel struct {
 	title    textinput.Model
 	body     textarea.Model
 	preview  viewport.Model
+
+	createKeys []string
 }
 
 type createPRLoadedMsg struct {
@@ -2260,7 +2281,7 @@ func runCreatePR(path string) {
 	ta.Placeholder = "PR description"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 20000
-	m := createPRModel{path: path, loading: true, title: ti, body: ta}
+	m := createPRModel{path: path, loading: true, title: ti, body: ta, createKeys: loadConfig().Keys.CreatePR.Create}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "gw create-pr:", err)
@@ -2306,6 +2327,19 @@ func (m createPRModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if keyIn(m.createKeys, msg.String()) {
+			if m.loading || m.creating {
+				return m, nil
+			}
+			title := strings.TrimSpace(m.title.Value())
+			body := strings.TrimSpace(m.body.Value())
+			if title == "" {
+				m.err = "title cannot be empty"
+				return m, nil
+			}
+			m.creating = true
+			return m, createPRCmd(m.path, m.draft.Base, m.draft.Head, title, body)
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
@@ -2324,18 +2358,6 @@ func (m createPRModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.preview.SetContent(m.previewText())
 			return m, nil
-		case "ctrl+s":
-			if m.loading || m.creating {
-				return m, nil
-			}
-			title := strings.TrimSpace(m.title.Value())
-			body := strings.TrimSpace(m.body.Value())
-			if title == "" {
-				m.err = "title cannot be empty"
-				return m, nil
-			}
-			m.creating = true
-			return m, createPRCmd(m.path, m.draft.Base, m.draft.Head, title, body)
 		}
 	}
 
@@ -2383,7 +2405,7 @@ func (m createPRModel) View() string {
 	if m.creating {
 		sb.WriteString("\n" + dimStyle.Render("Creating PR…") + "\n")
 	}
-	sb.WriteString("\n" + helpStyle.Render("tab  switch fields   ctrl+s  create PR   esc  cancel"))
+	sb.WriteString("\n" + helpStyle.Render("tab  switch fields   "+strings.Join(m.createKeys, "/")+"  create PR   esc  cancel"))
 	return sb.String()
 }
 
