@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -134,47 +136,159 @@ func (st *State) RemoveProject(path string) {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Config is the optional ~/.config/gw/config.json. Key names use the bubbletea
-// format ("ctrl+s").
-type Config struct {
-	Tmux struct {
-		// GlobalBindings maps an action in globalActions to keys that work
-		// without the tmux prefix.
-		GlobalBindings map[string][]string `json:"global_bindings"`
-	} `json:"tmux"`
-	Keys struct {
-		PRDetails struct {
-			Save []string `json:"save"`
-		} `json:"pr_details"`
-		CreatePR struct {
-			Create []string `json:"create"`
-		} `json:"create_pr"`
-	} `json:"keys"`
-}
+// Keys are the key names for one action, in the bubbletea format ("ctrl+s"). The
+// help text shows the first key. An empty list turns the action off.
+type Keys []string
 
-func loadConfig() Config {
-	var cfg Config
-	if data, err := os.ReadFile(filepath.Join(gwDir(), "config.json")); err == nil {
-		if json.Unmarshal(data, &cfg) != nil {
-			cfg = Config{}
-		}
-	}
-	if len(cfg.Keys.PRDetails.Save) == 0 {
-		cfg.Keys.PRDetails.Save = []string{"ctrl+s"}
-	}
-	if len(cfg.Keys.CreatePR.Create) == 0 {
-		cfg.Keys.CreatePR.Create = []string{"ctrl+s"}
-	}
-	return cfg
-}
-
-func keyIn(keys []string, key string) bool {
-	for _, k := range keys {
-		if k == key {
+func (k Keys) Has(key string) bool {
+	for _, name := range k {
+		if name == key {
 			return true
 		}
 	}
 	return false
+}
+
+// Label is the short form of the first key for help text.
+func (k Keys) Label() string {
+	if len(k) == 0 {
+		return ""
+	}
+	switch k[0] {
+	case "up":
+		return "↑"
+	case "down":
+		return "↓"
+	case "left":
+		return "←"
+	case "right":
+		return "→"
+	case " ":
+		return "space"
+	}
+	if rest, ok := strings.CutPrefix(k[0], "ctrl+"); ok && len(rest) == 1 {
+		return "^" + rest
+	}
+	return k[0]
+}
+
+type TmuxKeys struct {
+	FocusSidebar Keys `json:"focus_sidebar"`
+	NewTab       Keys `json:"new_tab"`
+	CloseTab     Keys `json:"close_tab"`
+	NextTab      Keys `json:"next_tab"`
+	PreviousTab  Keys `json:"previous_tab"`
+}
+
+type SidebarKeys struct {
+	MoveUp         Keys `json:"move_up"`
+	MoveDown       Keys `json:"move_down"`
+	Open           Keys `json:"open"`
+	NewWorktree    Keys `json:"new_worktree"`
+	AddProject     Keys `json:"add_project"`
+	RemoveWorktree Keys `json:"remove_worktree"`
+	RemoveProject  Keys `json:"remove_project"`
+	PRDetails      Keys `json:"pr_details"`
+	CreatePR       Keys `json:"create_pr"`
+	Refresh        Keys `json:"refresh"`
+	Search         Keys `json:"search"`
+	Help           Keys `json:"help"`
+	Quit           Keys `json:"quit"`
+}
+
+type PRDetailsKeys struct {
+	SwitchTab   Keys `json:"switch_tab"`
+	NextComment Keys `json:"next_comment"`
+	PrevComment Keys `json:"prev_comment"`
+	NewComment  Keys `json:"new_comment"`
+	Edit        Keys `json:"edit"`
+	Save        Keys `json:"save"`
+	Close       Keys `json:"close"`
+}
+
+type CreatePRKeys struct {
+	NextField Keys `json:"next_field"`
+	PrevField Keys `json:"prev_field"`
+	Create    Keys `json:"create"`
+}
+
+// Config is the optional ~/.config/gw/config.json. Only actions that have a
+// binding here can change. Enter, esc and arrows in text inputs and y/n dialogs
+// stay fixed, so that a config cannot make a dialog impossible to leave.
+type Config struct {
+	Tmux struct {
+		Prefix         string   `json:"prefix"`
+		PrefixBindings TmuxKeys `json:"prefix_bindings"`
+		// GlobalBindings work without the prefix.
+		GlobalBindings TmuxKeys `json:"global_bindings"`
+	} `json:"tmux"`
+	Keys struct {
+		Sidebar   SidebarKeys   `json:"sidebar"`
+		PRDetails PRDetailsKeys `json:"pr_details"`
+		CreatePR  CreatePRKeys  `json:"create_pr"`
+	} `json:"keys"`
+}
+
+func defaultConfig() Config {
+	var cfg Config
+	cfg.Tmux.Prefix = "ctrl+a"
+	cfg.Tmux.PrefixBindings = TmuxKeys{
+		FocusSidebar: Keys{"s"},
+		NewTab:       Keys{"c"},
+		CloseTab:     Keys{"x"},
+		NextTab:      Keys{"n"},
+		PreviousTab:  Keys{"p"},
+	}
+	cfg.Keys.Sidebar = SidebarKeys{
+		MoveUp:         Keys{"up", "k"},
+		MoveDown:       Keys{"down", "j"},
+		Open:           Keys{"enter", " ", "o"},
+		NewWorktree:    Keys{"n"},
+		AddProject:     Keys{"a"},
+		RemoveWorktree: Keys{"D"},
+		RemoveProject:  Keys{"d"},
+		PRDetails:      Keys{"P"},
+		CreatePR:       Keys{"C"},
+		Refresh:        Keys{"r"},
+		Search:         Keys{"/"},
+		Help:           Keys{"?"},
+		Quit:           Keys{"q", "ctrl+c"},
+	}
+	cfg.Keys.PRDetails = PRDetailsKeys{
+		SwitchTab:   Keys{"tab", "right", "l", "shift+tab", "left", "h"},
+		NextComment: Keys{"n"},
+		PrevComment: Keys{"p"},
+		NewComment:  Keys{"c"},
+		Edit:        Keys{"e"},
+		Save:        Keys{"ctrl+s"},
+		Close:       Keys{"q", "esc", "ctrl+c"},
+	}
+	cfg.Keys.CreatePR = CreatePRKeys{
+		NextField: Keys{"tab"},
+		PrevField: Keys{"shift+tab"},
+		Create:    Keys{"ctrl+s"},
+	}
+	return cfg
+}
+
+// loadConfig decodes config.json over the defaults, so the file holds only what
+// it changes. A file with an error applies not at all: the caller gets the
+// defaults and the error, which names a misspelled action.
+func loadConfig() (Config, error) {
+	data, err := os.ReadFile(filepath.Join(gwDir(), "config.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return defaultConfig(), nil
+	}
+	if err != nil {
+		return defaultConfig(), err
+	}
+	cfg := defaultConfig()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return defaultConfig(), fmt.Errorf("config.json: %s", strings.TrimPrefix(err.Error(), "json: "))
+	}
+	return cfg, nil
 }
 
 var tmuxKeyNames = map[string]string{
@@ -210,34 +324,47 @@ func tmuxKey(key string) string {
 	return sb.String()
 }
 
-// globalActions gives the tmux command for each action that config.json can bind.
-func globalActions(self string) map[string]string {
+type tmuxAction struct {
+	keys    Keys
+	command string
+}
+
+// actions pairs each key list with its tmux command. self is the shell-quoted gw
+// binary.
+func (t TmuxKeys) actions(self string) []tmuxAction {
 	shell := func(flag string) string {
 		return "run-shell " + tmuxQuote(self+" "+flag)
 	}
-	return map[string]string{
-		"focus_sidebar": "select-pane -t gw:active.0",
-		"new_tab":       shell("--new-subwindow"),
-		"close_tab":     shell("--close-subwindow"),
-		"next_tab":      shell("--next-subwindow"),
-		"previous_tab":  shell("--prev-subwindow"),
+	return []tmuxAction{
+		{t.FocusSidebar, "select-pane -t gw:active.0"},
+		{t.NewTab, shell("--new-subwindow")},
+		{t.CloseTab, shell("--close-subwindow")},
+		{t.NextTab, shell("--next-subwindow")},
+		{t.PreviousTab, shell("--prev-subwindow")},
 	}
 }
 
-// bindGlobalKeys binds the configured keys in tmux's root table. Those bindings
-// apply to the whole tmux server, so outside the gw session a key goes to the
-// program as usual.
-func bindGlobalKeys(self string, bindings map[string][]string) {
-	actions := globalActions(self)
-	for action, keys := range bindings {
-		command, ok := actions[action]
-		if !ok {
-			continue
+// bindTmuxKeys applies the prefix and global bindings. The default prefix keys are
+// unbound first: a moved action must not leave tmux's own meaning behind, because
+// next-window, for example, would show a storage window. tmux bindings apply to
+// the whole server, so outside the gw session a global key goes to the program as
+// usual.
+func bindTmuxKeys(self string, cfg Config) {
+	for _, a := range defaultConfig().Tmux.PrefixBindings.actions(self) {
+		for _, key := range a.keys {
+			exec.Command("tmux", "unbind-key", "-T", "prefix", tmuxKey(key)).Run()
 		}
-		for _, key := range keys {
+	}
+	for _, a := range cfg.Tmux.PrefixBindings.actions(self) {
+		for _, key := range a.keys {
+			exec.Command("tmux", "bind-key", "-T", "prefix", tmuxKey(key), a.command).Run()
+		}
+	}
+	for _, a := range cfg.Tmux.GlobalBindings.actions(self) {
+		for _, key := range a.keys {
 			k := tmuxKey(key)
 			exec.Command("tmux", "bind-key", "-n", k, "if-shell", "-F",
-				"#{==:#{session_name},gw}", command, "send-keys "+k).Run()
+				"#{==:#{session_name},gw}", a.command, "send-keys "+k).Run()
 		}
 	}
 }

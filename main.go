@@ -143,6 +143,9 @@ func setupTmuxSession() {
 // without killing the session.
 func configureSession(bin string) {
 	self := shellQuote(bin)
+	// A config error shows in the sidebar, which loads the same file.
+	cfg, _ := loadConfig()
+	prefix := tmuxKey(cfg.Tmux.Prefix)
 
 	// Hook to respawn pane 1 if it dies (fallback if remain-on-exit isn't enough).
 	exec.Command("tmux", "set-hook", "-t", "gw", "pane-died",
@@ -150,7 +153,7 @@ func configureSession(bin string) {
 
 	// Session-scoped options.
 	for _, opt := range [][]string{
-		{"prefix", "C-a"},
+		{"prefix", prefix},
 		{"mouse", "on"},
 		{"status", "off"},
 		{"pane-border-style", "fg=colour238"},
@@ -170,23 +173,16 @@ func configureSession(bin string) {
 		exec.Command("tmux", "set-option", "-s", "copy-command", "pbcopy").Run()
 		exec.Command("tmux", "set-option", "-s", "set-clipboard", "off").Run()
 	}
-	// Allow sending a literal C-a to the running program via ^a ^a.
-	exec.Command("tmux", "bind-key", "-T", "prefix", "C-a", "send-prefix").Run()
+	// Allow sending a literal prefix key to the running program by pressing it twice.
+	exec.Command("tmux", "bind-key", "-T", "prefix", prefix, "send-prefix").Run()
 
 	// Size the panes for the window now and on every future attach or resize.
 	layout := "run-shell " + tmuxQuote(self+" --layout")
 	exec.Command("tmux", "set-hook", "-t", "gw", "client-resized", layout).Run()
 	exec.Command("tmux", "set-hook", "-t", "gw", "client-attached", layout).Run()
 
-	// Sub-window keybindings (^a c/x/n/p) and sidebar focus (^a s).
-	exec.Command("tmux", "bind-key", "c", "run-shell", self+" --new-subwindow").Run()
-	exec.Command("tmux", "bind-key", "x", "run-shell", self+" --close-subwindow").Run()
-	exec.Command("tmux", "bind-key", "n", "run-shell", self+" --next-subwindow").Run()
-	exec.Command("tmux", "bind-key", "p", "run-shell", self+" --prev-subwindow").Run()
-	exec.Command("tmux", "bind-key", "s", "select-pane", "-t", "gw:active.0").Run()
+	bindTmuxKeys(self, cfg)
 	exec.Command("tmux", "bind-key", "b", "run-shell", self+" --pin-preview").Run()
-
-	bindGlobalKeys(self, loadConfig().Tmux.GlobalBindings)
 }
 
 func runNewSubwindow() {

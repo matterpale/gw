@@ -93,27 +93,75 @@ Each worktree can have multiple shell tabs (`^a c`). The status bar at the botto
 
 ### Custom keys
 
-Set keys in `~/.config/gw/config.json`. At each start or attach, gw reads this file. All fields are optional.
+Set keys in `~/.config/gw/config.json`. At each start or attach, gw reads this file. The file holds only what you change. All other actions keep their defaults.
 
 ```json
 {
   "tmux": {
-    "global_bindings": {
-      "focus_sidebar": ["ctrl+e"],
-      "new_tab": ["ctrl+t"],
-      "close_tab": [],
-      "next_tab": ["ctrl+f"],
-      "previous_tab": ["ctrl+d"]
-    }
+    "prefix": "ctrl+b",
+    "prefix_bindings": { "new_tab": ["t"] },
+    "global_bindings": { "focus_sidebar": ["ctrl+e"] }
   },
   "keys": {
-    "pr_details": { "save": ["ctrl+s"] },
-    "create_pr": { "create": ["ctrl+s"] }
+    "sidebar": { "new_worktree": ["w"] },
+    "pr_details": { "save": ["ctrl+g"] }
   }
 }
 ```
 
-The keys in `global_bindings` work without the `^a` prefix. Programs in the gw session no longer receive these keys. For example, `ctrl+d` no longer closes a shell there. If you remove a binding, restart the tmux server to clear it.
+Each action takes a list of keys, and the help text shows the first key. An empty list turns the action off. If the file has an error or a misspelled action, gw uses all defaults and shows the error in the sidebar.
+
+Key names use the Bubble Tea format. Examples are `n`, `D`, `ctrl+s`, `shift+tab`, and `f5`.
+
+Set the tmux prefix in `tmux.prefix`. Its default is `ctrl+a`. The tmux actions below go in `tmux.prefix_bindings`. They can also go in `tmux.global_bindings`, which has no default keys.
+
+| Tmux action | Default keys |
+|-------------|--------------|
+| `focus_sidebar` | `s` |
+| `new_tab` | `c` |
+| `close_tab` | `x` |
+| `next_tab` | `n` |
+| `previous_tab` | `p` |
+
+| Action in `keys.sidebar` | Default keys |
+|--------------------------|--------------|
+| `move_up` | `up` `k` |
+| `move_down` | `down` `j` |
+| `open` | `enter` space `o` |
+| `new_worktree` | `n` |
+| `add_project` | `a` |
+| `remove_worktree` | `D` |
+| `remove_project` | `d` |
+| `pr_details` | `P` |
+| `create_pr` | `C` |
+| `refresh` | `r` |
+| `search` | `/` |
+| `help` | `?` |
+| `quit` | `q` `ctrl+c` |
+
+| Action in `keys.pr_details` | Default keys |
+|-----------------------------|--------------|
+| `switch_tab` | `tab` `right` `l` `shift+tab` `left` `h` |
+| `next_comment` | `n` |
+| `prev_comment` | `p` |
+| `new_comment` | `c` |
+| `edit` | `e` |
+| `save` | `ctrl+s` |
+| `close` | `q` `esc` `ctrl+c` |
+
+| Action in `keys.create_pr` | Default keys |
+|----------------------------|--------------|
+| `next_field` | `tab` |
+| `prev_field` | `shift+tab` |
+| `create` | `ctrl+s` |
+
+These keys are fixed:
+
+- `1` to `6` in the sidebar
+- the scroll keys in the PR details popup
+- `enter`, `esc`, `ctrl+c`, and arrows in text inputs and confirmation dialogs
+
+The keys in `global_bindings` work without the prefix. Programs in the gw session do not receive these keys. For example, `ctrl+d` does not close a shell there. If you remove a global binding or change the prefix, restart the tmux server to clear the old key.
 
 ## macOS and iTerm2
 
