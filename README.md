@@ -177,7 +177,7 @@ To use `alt` shortcuts in the PR editors, set the Option key to `Esc+` in the iT
 
 ## Notifications
 
-Background agents (Claude, Codex, and similar tools) often stop to ask for permission to run a command or make an edit. You can miss this in a worktree that you are not looking at. gw watches the pane of each worktree for these prompts and shows them in two ways:
+Background agents (Claude, Codex, Cursor, and similar tools) often stop to ask for permission to run a command or make an edit. You can miss this in a worktree that you are not looking at. gw watches the pane of each worktree for these prompts and shows them in two ways:
 
 - The status indicator of the worktree in the activity list turns orange `⚠ input`.
 - If a new prompt appears, gw sends a desktop notification. The title is `⚠ worktree needs input`, and the text names the project and branch. gw also notifies for the foreground worktree, because you can be in another window.
@@ -209,7 +209,7 @@ Set these environment variables before you start `gw`:
 | `GW_ATTN_PATTERNS` | built-in list | `\|`-separated, case-insensitive substrings that mark a pane as waiting for input. This list replaces the defaults. |
 | `GW_NOTIFY_TIMEOUT` | `35` | Seconds before gw closes an unused notification. |
 
-The default patterns match common Claude and Codex permission prompts (`do you want to proceed`, `do you want to run`, `allow command`, `1. yes`, and others). If your agent uses different words, set `GW_ATTN_PATTERNS`.
+The default patterns match common Claude and Codex permission prompts (`do you want to proceed`, `do you want to run`, `allow command`, `1. yes`, and others). They also match the wait texts of the Cursor CLI (`agent`) for an approval, an answer, or a mode switch. If your agent uses different words, set `GW_ATTN_PATTERNS`.
 
 ## Pull requests
 

@@ -94,9 +94,19 @@ func TestMonitorScriptDrawsCPUAndRAMOnThisPlatform(t *testing.T) {
 // windowsListFakes installs a tmux that reports one waiting background worktree
 // (main) and one active worktree (feature), plus an `open` that only logs.
 func windowsListFakes(r *scriptRun) {
+	windowsListFakesShowing(r, "Do you want to proceed?")
+}
+
+// windowsListFakesShowing is windowsListFakes with the given text on the screen
+// of the background worktree.
+func windowsListFakesShowing(r *scriptRun, screen string) {
+	screenFile := filepath.Join(r.dir, "screen.txt")
+	if err := os.WriteFile(screenFile, []byte(screen), 0644); err != nil {
+		r.t.Fatal(err)
+	}
 	r.fake("tmux", `case "$1" in
 list-panes) printf 'wt-my-proj-main\t0\t0\tnode\nwt-my-proj-feature\t0\t0\tzsh\n' ;;
-capture-pane) [ "$4" = "gw:wt-my-proj-main.0" ] && echo "Do you want to proceed?" ;;
+capture-pane) [ "$4" = "gw:wt-my-proj-main.0" ] && cat "`+screenFile+`" ;;
 *) echo "$@" >> "`+r.dir+`/tmux.log" ;;
 esac`)
 	r.fake("open", `echo "$@" >> "`+r.dir+`/open.log"`)
@@ -176,6 +186,73 @@ func TestTerminalNotifierClickSwitchesToTheWaitingWorktree(t *testing.T) {
 	opened, _ := os.ReadFile(filepath.Join(r.dir, "open.log"))
 	if !strings.Contains(string(opened), "-b com.googlecode.iterm2") {
 		t.Fatalf("click did not raise iTerm2: %q", opened)
+	}
+}
+
+// The Cursor agent ("agent") screens below use the texts of its 2026.10.22 bundle.
+var cursorWaitScreens = map[string]string{
+	"approval": ` ⬢ Shell rm -rf build
+   Waiting for approval...
+
+ Run this command?
+ Not in allowlist: rm -rf build
+  → Run (once) (y)
+    Add Shell(rm) to allowlist (tab)
+    Auto-run (shift+tab)
+    Skip (esc or n)
+
+ → Waiting for decision (y/n/p)...`,
+	"question": ` Which database do you use?
+  → Postgres
+    SQLite
+
+ → Answer questions (Enter to select/next, Esc to skip)`,
+	"mode switch": ` Switch to Agent mode to make the changes?
+
+ → Approve mode switch (y/n)`,
+}
+
+func TestWindowsListMarksACursorWaitAsInputAndNotifiesOnce(t *testing.T) {
+	for name, screen := range cursorWaitScreens {
+		t.Run(name, func(t *testing.T) {
+			r := newScriptRun(t)
+			windowsListFakesShowing(r, screen)
+			argvLog := filepath.Join(r.dir, "notifier.log")
+			r.fake("terminal-notifier", `for a in "$@"; do printf '%s\n' "$a" >> "`+argvLog+`"; done`)
+
+			stdout, _ := r.run(windowsListScript, 1500*time.Millisecond, r.dir)
+
+			if !strings.Contains(stdout, "input") {
+				t.Fatalf("Cursor wait not marked as input:\n%q", stdout)
+			}
+			data, err := os.ReadFile(argvLog)
+			if err != nil {
+				t.Fatalf("no notification: %v", err)
+			}
+			if n := strings.Count(string(data), "-message\n"); n != 1 {
+				t.Fatalf("%d notifications, want 1", n)
+			}
+		})
+	}
+}
+
+func TestWindowsListKeepsAWorkingCursorAgentRunning(t *testing.T) {
+	r := newScriptRun(t)
+	windowsListFakesShowing(r, ` ⬢ Read README.md
+ ⬢ Shell go test ./...
+   … 12 output lines hidden · ctrl+o to expand
+
+ → Add a follow-up                                  ctrl+c to stop`)
+	argvLog := filepath.Join(r.dir, "notifier.log")
+	r.fake("terminal-notifier", `for a in "$@"; do printf '%s\n' "$a" >> "`+argvLog+`"; done`)
+
+	stdout, _ := r.run(windowsListScript, 1500*time.Millisecond, r.dir)
+
+	if strings.Contains(stdout, "input") || !strings.Contains(stdout, "running") {
+		t.Fatalf("a working agent is not shown as running:\n%q", stdout)
+	}
+	if _, err := os.Stat(argvLog); err == nil {
+		t.Fatal("a working agent sent a notification")
 	}
 }
 

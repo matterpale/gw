@@ -504,7 +504,7 @@ func writeMonitorScript() string {
 //	blue   current   — sub-window is visible in the main pane
 //	green  ● idle    — shell is in the foreground
 //	yellow ⠋ running — a program is running (animated braille spinner)
-//	orange ⚠ input   — an agent (claude/codex/…) is waiting for permission
+//	orange ⚠ input   — an agent (claude/codex/cursor/…) is waiting for permission
 //	red    ✕ error   — pane is dead / unusable
 //
 // "input" detection works by scraping each running agent pane with capture-pane
@@ -525,8 +525,8 @@ W = 24
 RST = '\033[0m'
 SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
-# Permission-prompt markers for claude / codex and similar agents. Matched as
-# case-insensitive substrings against the visible pane text.
+# Permission-prompt markers for claude / codex / cursor and similar agents. Matched
+# as case-insensitive substrings against the visible pane text.
 DEFAULT_PATTERNS = [
     'do you want to proceed',
     'do you want to make this edit',
@@ -537,6 +537,10 @@ DEFAULT_PATTERNS = [
     'approve this',
     'waiting for your approval',
     '❯ 1. yes',
+    # Cursor's "agent" shows these in its input box while it waits for you.
+    'waiting for decision (y/n/p)',
+    'approve mode switch (y/n)',
+    'answer questions (enter to select/next, esc to skip)',
 ]
 _env = os.environ.get('GW_ATTN_PATTERNS', '')
 PATTERNS = [p.strip().lower() for p in _env.split('|') if p.strip()] if _env else DEFAULT_PATTERNS
