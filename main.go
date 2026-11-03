@@ -59,7 +59,9 @@ func launch() {
 			st.AddProject(root)
 			// Remember the worktree we launched from so the sidebar defaults
 			// its cursor to it instead of the first item in the list.
-			st.LaunchWorktree = filepath.Clean(root)
+			if wt, err := gitWorktreeRoot(wd); err == nil {
+				st.LaunchWorktree = filepath.Clean(wt)
+			}
 		}
 	}
 

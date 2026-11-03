@@ -36,6 +36,77 @@ func worktreeRepo(t *testing.T, ignoreCase string) string {
 	return repo
 }
 
+func runGit(t *testing.T, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// linkedWorktree adds a worktree for branch "foo" outside the repository, as
+// supacode does, and gives it a subfolder.
+func linkedWorktree(t *testing.T, repo string) string {
+	t.Helper()
+	wt := filepath.Join(filepath.Dir(repo), "elsewhere", "foo")
+	runGit(t, "-C", repo, "worktree", "add", "-q", wt, "foo")
+	if err := os.MkdirAll(filepath.Join(wt, "deep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
+// realPath gives the path as git reports it. On macOS the temp folder is under a
+// symlink (/var is /private/var).
+func realPath(t *testing.T, path string) string {
+	t.Helper()
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestGitRepoRootOfALinkedWorktreeIsTheMainRepository(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+	wt := linkedWorktree(t, repo)
+
+	for _, path := range []string{wt, filepath.Join(wt, "deep")} {
+		got, err := gitRepoRoot(path)
+		if err != nil {
+			t.Fatalf("gitRepoRoot(%s): %v", path, err)
+		}
+		if got != realPath(t, repo) {
+			t.Errorf("gitRepoRoot(%s) = %s, want the main repository %s", path, got, realPath(t, repo))
+		}
+	}
+}
+
+func TestGitRepoRootKeepsTheMainRepositoryAndSubmodules(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+	lib := filepath.Join(filepath.Dir(repo), "lib")
+	runGit(t, "init", "-q", "-b", "main", lib)
+	runGit(t, "-C", lib, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i")
+	runGit(t, "-C", repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "mods/lib")
+	if err := os.MkdirAll(filepath.Join(repo, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		repo:                               repo,
+		filepath.Join(repo, "sub"):         repo,
+		filepath.Join(repo, "mods", "lib"): filepath.Join(repo, "mods", "lib"),
+	}
+	for path, want := range cases {
+		got, err := gitRepoRoot(path)
+		if err != nil {
+			t.Fatalf("gitRepoRoot(%s): %v", path, err)
+		}
+		if got != realPath(t, want) {
+			t.Errorf("gitRepoRoot(%s) = %s, want %s", path, got, realPath(t, want))
+		}
+	}
+}
+
 func TestAddWorktreeRejectsBranchThatDiffersOnlyByCase(t *testing.T) {
 	repo := worktreeRepo(t, "true")
 

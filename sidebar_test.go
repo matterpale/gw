@@ -101,6 +101,37 @@ func TestSidebarHelpShowsConfiguredKeys(t *testing.T) {
 	}
 }
 
+func TestSidebarAddProjectWithALinkedWorktreeTracksTheMainRepository(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+	wt := linkedWorktree(t, repo)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	m := sidebarWithWorktrees(1, 40, 50)
+	m.view = viewAddProject
+	m.input.SetValue(wt)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("enter did not add the project")
+	}
+	added, ok := cmd().(projectAdded)
+	if !ok || added.err != nil {
+		t.Fatalf("project not added: %+v", added)
+	}
+	if added.path != realPath(t, repo) {
+		t.Fatalf("tracked %s, want the main repository %s", added.path, realPath(t, repo))
+	}
+	if got := loadState().Projects; len(got) != 1 || got[0].Path != realPath(t, repo) || got[0].Name != "repo" {
+		t.Fatalf("state.json projects = %+v", got)
+	}
+
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if again := cmd().(projectAdded); again.err == nil || !strings.Contains(again.err.Error(), "already tracked: repo") {
+		t.Fatalf("a worktree of a tracked repository was not reported: %+v", again)
+	}
+}
+
 func TestSidebarDigitsStillOpenFrequentWorktrees(t *testing.T) {
 	m := sidebarWithWorktrees(1, 40, 50)
 	m.items = append(m.items, listItem{isHeader: true, frequent: true},

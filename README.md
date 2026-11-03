@@ -42,7 +42,7 @@ make install
 
 ## Usage
 
-Run `gw` from any directory. If the directory is inside a git repository, gw tracks that repository.
+Run `gw` from any directory. If the directory is inside a git repository, gw tracks that repository. If the directory is in a linked worktree, gw tracks the main repository and opens that worktree. A linked worktree is a worktree that `git worktree add` made.
 
 ```
 gw

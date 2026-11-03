@@ -1408,9 +1408,21 @@ func isGitRepo(path string) bool {
 	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
 }
 
+// gitRepoRoot returns the main worktree of the repository at path, so that a
+// linked worktree resolves to the repository that it belongs to. A submodule or a
+// bare repository has no ".git" folder in a main worktree, so it keeps the top
+// level of path.
 func gitRepoRoot(path string) (string, error) {
-	out, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
-	return strings.TrimSpace(string(out)), err
+	common, err := gitOutput(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err == nil && filepath.Base(common) == ".git" {
+		return filepath.Dir(common), nil
+	}
+	return gitWorktreeRoot(path)
+}
+
+// gitWorktreeRoot returns the top level of the worktree that contains path.
+func gitWorktreeRoot(path string) (string, error) {
+	return gitOutput(path, "rev-parse", "--show-toplevel")
 }
 
 // ── Sub-window management ──────────────────────────────────────────────────────
