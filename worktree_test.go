@@ -110,7 +110,7 @@ func TestGitRepoRootKeepsTheMainRepositoryAndSubmodules(t *testing.T) {
 func TestAddWorktreeRejectsBranchThatDiffersOnlyByCase(t *testing.T) {
 	repo := worktreeRepo(t, "true")
 
-	_, _, err := addWorktree(repo, "repo", "Foo", "")
+	_, _, err := addWorktree(repo, "repo", "Foo", "", ".gw")
 
 	if err == nil {
 		t.Fatal("expected a case collision error")
@@ -118,15 +118,55 @@ func TestAddWorktreeRejectsBranchThatDiffersOnlyByCase(t *testing.T) {
 	if !strings.Contains(err.Error(), `"foo"`) {
 		t.Fatalf("error does not name the existing branch: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(filepath.Dir(repo), "repo-Foo")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(repo), ".gw", "repo", "Foo")); statErr == nil {
 		t.Fatal("a worktree was created despite the collision")
+	}
+}
+
+func TestAddWorktreePutsTheWorktreeInTheGwFolderNextToTheProject(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+
+	wt, _, err := addWorktree(repo, "repo", "foo", "", ".gw")
+
+	assertWorktreeAt(t, wt, err, filepath.Join(filepath.Dir(repo), ".gw", "repo", "foo"))
+}
+
+func TestAddWorktreePutsTheWorktreeInAnAbsoluteWorktreeDir(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+	dir := filepath.Join(t.TempDir(), "trees")
+
+	wt, _, err := addWorktree(repo, "repo", "feat/x", "", dir)
+
+	assertWorktreeAt(t, wt, err, filepath.Join(dir, "repo", "feat-x"))
+}
+
+func TestAddWorktreeExpandsAHomeWorktreeDir(t *testing.T) {
+	repo := worktreeRepo(t, "false")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	wt, _, err := addWorktree(repo, "repo", "foo", "", "~/trees")
+
+	assertWorktreeAt(t, wt, err, filepath.Join(home, "trees", "repo", "foo"))
+}
+
+func assertWorktreeAt(t *testing.T, wt Worktree, err error, want string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("addWorktree: %v", err)
+	}
+	if wt.Path != want {
+		t.Fatalf("path = %s, want %s", wt.Path, want)
+	}
+	if _, err := os.Stat(filepath.Join(want, ".git")); err != nil {
+		t.Fatalf("no worktree at %s: %v", want, err)
 	}
 }
 
 func TestAddWorktreeAcceptsExactBranchName(t *testing.T) {
 	repo := worktreeRepo(t, "true")
 
-	wt, _, err := addWorktree(repo, "repo", "foo", "")
+	wt, _, err := addWorktree(repo, "repo", "foo", "", ".gw")
 
 	if err != nil {
 		t.Fatalf("addWorktree: %v", err)

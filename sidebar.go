@@ -822,7 +822,7 @@ func (m sidebarModel) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			proj := msg.proj
 			branch := msg.branch
 			return m, func() tea.Msg {
-				wt, title, err := addWorktree(proj.Path, proj.Name, branch, "")
+				wt, title, err := addWorktree(proj.Path, proj.Name, branch, "", m.cfg.WorktreeDir)
 				return worktreeAdded{wt: wt, title: title, proj: proj, err: err}
 			}
 		}
@@ -864,7 +864,7 @@ func (m sidebarModel) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.createStep = 0
 				return m, func() tea.Msg {
-					wt, title, err := addWorktree(proj.Path, proj.Name, branch, startPoint)
+					wt, title, err := addWorktree(proj.Path, proj.Name, branch, startPoint, m.cfg.WorktreeDir)
 					return worktreeAdded{wt: wt, title: title, proj: proj, err: err}
 				}
 			}

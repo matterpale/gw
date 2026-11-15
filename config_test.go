@@ -92,6 +92,9 @@ func TestLoadConfigWithoutAFileGivesDefaultsAndNoError(t *testing.T) {
 	if len(cfg.Tmux.GlobalBindings.NewTab) != 0 {
 		t.Fatalf("global bindings must be off by default: %v", cfg.Tmux.GlobalBindings.NewTab)
 	}
+	if cfg.WorktreeDir != ".gw" {
+		t.Fatalf("default worktree_dir = %q", cfg.WorktreeDir)
+	}
 }
 
 func TestLoadConfigReportsATypoAndFallsBackToDefaults(t *testing.T) {
@@ -104,6 +107,33 @@ func TestLoadConfigReportsATypoAndFallsBackToDefaults(t *testing.T) {
 	}
 	if !keysEqual(cfg.Keys.Sidebar.Quit, []string{"q", "ctrl+c"}) {
 		t.Fatalf("a rejected file must not apply partly: %v", cfg.Keys.Sidebar.Quit)
+	}
+}
+
+func TestLoadConfigReadsTheWorktreeDir(t *testing.T) {
+	writeConfig(t, `{"worktree_dir": "~/trees"}`)
+
+	cfg, err := loadConfig()
+
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.WorktreeDir != "~/trees" {
+		t.Fatalf("worktree_dir = %q", cfg.WorktreeDir)
+	}
+}
+
+// An empty worktree_dir would put each worktree inside the main repository.
+func TestLoadConfigKeepsTheDefaultForAnEmptyWorktreeDir(t *testing.T) {
+	writeConfig(t, `{"worktree_dir": ""}`)
+
+	cfg, err := loadConfig()
+
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.WorktreeDir != ".gw" {
+		t.Fatalf("worktree_dir = %q, want the default", cfg.WorktreeDir)
 	}
 }
 

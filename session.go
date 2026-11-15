@@ -227,10 +227,14 @@ type Config struct {
 		PRDetails PRDetailsKeys `json:"pr_details"`
 		CreatePR  CreatePRKeys  `json:"create_pr"`
 	} `json:"keys"`
+	// WorktreeDir holds new worktrees as <dir>/<project>/<branch>. A relative
+	// path starts at the folder that holds the project.
+	WorktreeDir string `json:"worktree_dir"`
 }
 
 func defaultConfig() Config {
 	var cfg Config
+	cfg.WorktreeDir = ".gw"
 	cfg.Tmux.Prefix = "ctrl+a"
 	cfg.Tmux.PrefixBindings = TmuxKeys{
 		FocusSidebar: Keys{"s"},
@@ -287,6 +291,9 @@ func loadConfig() (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return defaultConfig(), fmt.Errorf("config.json: %s", strings.TrimPrefix(err.Error(), "json: "))
+	}
+	if cfg.WorktreeDir == "" {
+		cfg.WorktreeDir = defaultConfig().WorktreeDir
 	}
 	return cfg, nil
 }
@@ -1560,12 +1567,16 @@ func caseCollision(projectPath, branch string) string {
 	return ""
 }
 
-func addWorktree(projectPath, projectName, branch, startPoint string) (Worktree, string, error) {
+func addWorktree(projectPath, projectName, branch, startPoint, worktreeDir string) (Worktree, string, error) {
 	if existing := caseCollision(projectPath, branch); existing != "" {
 		return Worktree{}, "", fmt.Errorf("branch %q differs only by case from %q", branch, existing)
 	}
 	safe := strings.ReplaceAll(branch, "/", "-")
-	wtPath := filepath.Join(filepath.Dir(projectPath), filepath.Base(projectPath)+"-"+safe)
+	root := expandHome(worktreeDir)
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(filepath.Dir(projectPath), root)
+	}
+	wtPath := filepath.Join(root, filepath.Base(projectPath), safe)
 
 	var out []byte
 	var err error

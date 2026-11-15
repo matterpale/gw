@@ -58,6 +58,18 @@ The sidebar pins your most-used worktrees in a frequent section at the top. The 
 
 If you run `gw` while a session is open, gw attaches to that session.
 
+### Worktree folder
+
+gw puts a new worktree in `.gw/<project>/<branch>`, in the folder that holds the project. For example, the branch `feat/login` of `~/Code/api` goes to `~/Code/.gw/api/feat-login`. gw replaces each `/` in a branch name with `-`.
+
+To use a different folder, set `worktree_dir` in `~/.config/gw/config.json`. A relative path starts at the folder that holds the project. gw uses an absolute path, or a path that starts with `~/`, without change.
+
+```json
+{ "worktree_dir": "~/worktrees" }
+```
+
+gw does not move worktrees that exist. gw finds each worktree with `git worktree list`, so older worktrees stay in the sidebar.
+
 ## Keys
 
 ### Sidebar
